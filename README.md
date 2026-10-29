@@ -198,8 +198,8 @@ a full closed-loop pick-and-place pipeline: **GraspGenX** grasps → **cuRobo**
 collision-free motion planning → **Newton/MuJoCo** physics replay (gravity +
 contacts) → **MP4** render + **USD** export for IsaacSim / Omniverse. Four
 example demos ship out of the box — a Franka Panda (single object → bin, and a
-3-object clutter scene → bin) and a UR10e with two multi-finger hands
-(arx_x5 pick-and-lift, surge_hand pick → bin).
+3-object clutter scene → bin) and a UR10e pick-and-lift with an arx_x5 or a
+Robotiq 2F-140. A UR10e + surge_hand robot config is included as well.
 
 This pipeline needs an extra dependency stack (cuRobo, Newton, MuJoCo, CoACD,
 USD, fcl):

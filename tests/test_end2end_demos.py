@@ -2,12 +2,15 @@
 
 Runs each of the four featured ``end2end/`` demos through the real pipeline
 (GraspGenX → cuRobo → Newton) and checks the *outcome* from the exported
-``trajectory.json`` — no rendering. The four demos:
+``trajectory.json`` — no rendering. The four demos, plus demo 4 planned with
+the cuMotion backend:
 
   1. franka_single   Franka Panda picks one HOPE object → bin.
   2. franka_clutter3 Franka Panda clears a 3-object HOPE scene → bin.
   3. arx_lift        UR10e + arx_x5 grasps + lifts one object (no bin).
   4. robotiq_lift    UR10e + Robotiq 2F-140 grasps + lifts one object (no bin).
+     robotiq_lift_cumotion  the same, with ``--motion_backend cumotion``
+     (skips unless cuMotion is installed: ``setup_end2end_deps.py --cumotion``).
 
 These are slow GPU integration tests (model load + sim per demo). Run with::
 
@@ -70,6 +73,14 @@ DEMOS = {
         extra_args=["--hold_after_close_frames", "150"],
         outcome="lift", min_in_bin=0, n_objects=1,
     ),
+    "robotiq_lift_cumotion": dict(
+        robot="ur10e_robotiq_2f_140.yaml",
+        env="tabletop_single_nobin.yaml",
+        task="pick_and_lift",
+        mesh=str(HOPE / "GranolaBars.obj"),
+        extra_args=["--hold_after_close_frames", "150", "--motion_backend", "cumotion"],
+        outcome="lift", min_in_bin=0, n_objects=1, needs_cumotion=True,
+    ),
 }
 
 # Bin footprint half-extent (+ margin) used to decide "landed in the bin".
@@ -89,6 +100,14 @@ def _curobo_available() -> bool:
         if not hasattr(wp.config, "verbose"):
             wp.config.verbose = False
         import newton  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _cumotion_available() -> bool:
+    try:
+        import cumotion  # noqa: F401
         return True
     except Exception:
         return False
@@ -168,6 +187,11 @@ def _run_demo(spec: dict, traj_path: Path) -> None:
 @pytest.mark.parametrize("name", list(DEMOS))
 def test_end2end_demo(name, tmp_path):
     spec = DEMOS[name]
+    if spec.get("needs_cumotion") and not _cumotion_available():
+        pytest.skip(
+            "cuMotion not installed — run "
+            "`python end2end/setup_end2end_deps.py --cumotion` first."
+        )
 
     # UR10e demos need the generated merged URDF + cuRobo YAML (gitignored).
     # Skip with a hint on a fresh checkout where they haven't been built yet.

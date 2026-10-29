@@ -2,8 +2,9 @@
 
 This `README` gives examples of using GraspGenX in a end-to-end application, using a Motion Planner (curobo) and evaluated on a physics simulator (Newton). One can also use it to generate Synthetic Data Generation (SDG) for Vision-Language-Action (VLA) training. In these examples, the simulator and GraspGenX model uses the complete object mesh point cloud, but it can be extended to using using RGB-D observations from the simulator and using SAM segmentation.
 
-**GraspGenX** predicts grasps on each object → **cuRobo** plans a
-collision-free arm trajectory to a collision-free grasp → **Newton/MuJoCo**
+**GraspGenX** predicts grasps on each object → **cuRobo** (or, for
+single-object pick-and-lift, **cuMotion**) plans a collision-free arm
+trajectory to a collision-free grasp → **Newton/MuJoCo**
 replays the trajectory under gravity + contacts (PD-controlled joints) →
 renders an **MP4** and exports a **USD** animation.
 
@@ -107,6 +108,43 @@ along the GraspGenX grasp X axis.
 `tests/test_end2end_robot_configs.py` checks this alignment without a
 simulator.
 
+### Planning with cuMotion instead of cuRobo
+
+Single-object `pick_and_lift` runs can plan the arm with
+[NVIDIA cuMotion](https://github.com/nvidia-isaac/cumotion), the library behind
+Isaac ROS cuMotion, instead of cuRobo. Everything else (GraspGenX, scene,
+Newton playback) is unchanged. cuMotion is not on PyPI; install its release
+wheel once:
+
+```bash
+python end2end/setup_end2end_deps.py --cumotion   # into ext/cumotion (CUDA 12.6 build)
+```
+
+cuMotion is distributed under the NVIDIA Isaac ROS Software License (not
+Apache-2.0); it is downloaded on request, not vendored in this repository.
+
+Then add `--motion_backend cumotion` to demo 4 (or any UR10e `pick_and_lift`
+run):
+
+```bash
+PYOPENGL_PLATFORM=egl PYGLET_HEADLESS=true uv run --no-sync python end2end/e2e_grasp_demo.py \
+  --mesh_file assets/sample_data/hope_objects/GranolaBars.obj \
+  --task pick_and_lift --playback_mode dynamic --no-viser \
+  --hold_after_close_frames 150 --seed 0 --motion_backend cumotion \
+  --export-trajectory end2end/runs/robotiq_lift_cumotion/trajectory.json
+```
+
+`end2end/cumotion_backend.py` converts the generated cuRobo robot YAML
+(collision spheres, self-collision ignores, locked gripper joint) to cuMotion's
+XRDF on the fly, so no extra robot files are needed. The plan mirrors cuRobo's
+`plan_grasp`: one goalset trajectory optimization to the pre-grasp poses of the
+top grasps (cuMotion picks the reachable one), then an exact straight-line
+approach and lift (task-space path → time-optimal trajectory, each sample
+collision-checked), walking the same approach/lift-offset fallbacks. It
+supports cuboid obstacles and the default goalset mode; the bin and clutter
+tasks still need cuRobo. Set `GRASPGENX_CUMOTION_CUDA=13.0` before running the
+setup script for the CUDA 13 build (Blackwell GPUs, Jetson Thor).
+
 ---
 
 ## Render & export to USD
@@ -208,9 +246,12 @@ the real pipeline and checks the outcome from the trajectory (no rendering):
 uv run pytest tests/test_end2end_demos.py -m end2end -v -s
 ```
 
-These are slow GPU integration tests. The UR10e cases skip with a hint if the
-merged URDFs haven't been built yet — re-run `python end2end/setup_end2end_deps.py`
-(it builds them).
+These are slow GPU integration tests. The UR10e case skips with a hint if the
+merged URDF hasn't been built yet — re-run `python end2end/setup_end2end_deps.py`
+(it builds it). The `robotiq_lift_cumotion` case skips unless cuMotion is
+installed (`setup_end2end_deps.py --cumotion`); the faster
+`tests/test_cumotion_backend.py` checks the XRDF conversion and the straight
+approach/lift without the simulator.
 
 ---
 

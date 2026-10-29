@@ -411,7 +411,10 @@ bin (`envs/franka_clutter3_demo.yaml`, add `--max_retries_per_object 2`), and
 UR10e pick-and-lift with an arx_x5 (`robots/ur10e_arx_x5.yaml`) or a Robotiq
 2F-140 (`robots/ur10e_robotiq_2f_140.yaml`, the script default), both on
 `envs/tabletop_single_nobin.yaml` with `--mesh_file … --hold_after_close_frames
-150`. Each writes a `trajectory.json`; render it decoupled from the sim:
+150`. Single-object `pick_and_lift` runs can plan with NVIDIA cuMotion instead
+of cuRobo: `python end2end/setup_end2end_deps.py --cumotion` once, then add
+`--motion_backend cumotion`. Each writes a `trajectory.json`; render it
+decoupled from the sim:
 
 ```bash
 PYOPENGL_PLATFORM=egl uv run python end2end/render_trajectory_mp4.py \

@@ -5,7 +5,8 @@ Pipeline:
   1. Build a scene (env + manipulation object + robot) via scene_synthesizer
   2. Visualize it in viser
   3. Run GraspGen inference to predict grasps on the object
-  4. Initialize cuRobo MotionPlanner with the env's collision world
+  4. Initialize the motion planner (cuRobo by default, or cuMotion with
+     --motion_backend cumotion) with the env's collision world
   5. Pick a non-colliding start joint config and a random predicted grasp
   6. Plan a collision-free trajectory to the grasp
   7. Animate the trajectory in viser
@@ -104,6 +105,17 @@ def parse_args() -> argparse.Namespace:
         help="Confidence floor for grasps. Matches the default in "
         "scripts/demo_object_pc.py. Use -1 to disable and "
         "rank by topk only.",
+    )
+    ap.add_argument(
+        "--motion_backend",
+        choices=["curobo", "cumotion"],
+        default="curobo",
+        help="Arm motion planner. curobo (default) uses cuRobo's "
+        "MotionPlanner.plan_grasp. cumotion uses NVIDIA cuMotion (the "
+        "library behind Isaac ROS cuMotion): a goalset trajectory "
+        "optimization to the pre-grasp poses, then exact straight-line "
+        "approach and lift. cumotion supports --task pick_and_lift only; "
+        "install it with `python end2end/setup_end2end_deps.py --cumotion`.",
     )
     ap.add_argument(
         "--planner",
@@ -991,6 +1003,103 @@ def plan_to_grasp(
 
 
 # ---------------------------------------------------------------------------
+# cuMotion planning (--motion_backend cumotion)
+# ---------------------------------------------------------------------------
+
+
+def init_cumotion_planner(
+    combo_path: Path, robot_cfg: Dict[str, Any], scene_model: Dict[str, Any]
+):
+    """Build a cuMotion planner from the same robot YAML + scene as cuRobo."""
+    from cumotion_backend import CuMotionGraspPlanner
+
+    robot_dict = resolve_curobo_robot_dict(combo_path, robot_cfg)
+    if not isinstance(robot_dict, dict):
+        raise SystemExit(
+            f"--motion_backend cumotion needs a local robot YAML; {robot_dict!r} "
+            "is a cuRobo content-tree name"
+        )
+    if scene_model.get("mesh"):
+        raise SystemExit("--motion_backend cumotion supports cuboid obstacles only")
+    log.info("Initializing cuMotion trajectory optimizer")
+    return CuMotionGraspPlanner(
+        robot_dict,
+        robot_dict["robot_cfg"]["kinematics"]["urdf_path"],
+        robot_cfg["curobo"]["tool_frame"],
+        scene_model.get("cuboid", {}),
+    )
+
+
+def plan_to_grasp_cumotion(
+    planner,
+    robot_cfg: Dict[str, Any],
+    grasps_world: np.ndarray,
+    conf: np.ndarray,
+    max_attempts: int,
+    robot_base_T: np.ndarray,
+):
+    """cuMotion counterpart of :func:`plan_to_grasp` (default goalset mode).
+
+    Sends the top ``max_attempts`` grasps (by confidence) as one goalset and
+    walks the same approach/lift strategy table as the cuRobo path. Returns
+    the same ``(success, result, chosen_idx, pregrasp_traj, lift_traj)``
+    tuple, with ``result._segments`` set for the task state machine.
+    """
+    g2t = robot_cfg.get("grasp_to_tool_transform", {})
+    T_offset = np.eye(4)
+    T_offset[:3, 3] = g2t.get("translation", [0, 0, 0])
+    qx, qy, qz, qw = g2t.get("quaternion_xyzw", [0, 0, 0, 1])
+    T_offset[:3, :3] = tra.quaternion_matrix([qw, qx, qy, qz])[:3, :3]
+    T_world_robot_inv = tra.inverse_matrix(robot_base_T)
+
+    kept = [int(i) for i in np.argsort(-conf)[:max_attempts]]
+    goals = [T_world_robot_inv @ grasps_world[i] @ T_offset for i in kept]
+    q_start = robot_cfg["curobo"]["default_joint_position"]
+    log.info("cuMotion goalset: %d candidates", len(kept))
+
+    strategies = [
+        (a, lift, f"full (a={round(-a * 100)}, lift={round(-lift * 100)})")
+        for a in (-0.15, -0.10, -0.07)
+        for lift in (-0.20, -0.12, -0.06)
+    ]
+    candidates = planner.collision_free_grasps(goals)
+    log.info(
+        "cuMotion: %d of %d grasps have a collision-free IK solution",
+        len(candidates),
+        len(goals),
+    )
+    result = None
+    for approach_offset, lift_offset, label in strategies:
+        result = planner.plan_grasp(
+            goals, q_start, approach_offset, lift_offset, candidates=candidates
+        )
+        log.info("cuMotion '%s' -> %s (%s)", label, result.success, result.status)
+        if result.success:
+            break
+    if result is None or not result.success:
+        log.warning("All cuMotion strategies failed")
+        return False, result, -1, None, None
+
+    target_idx = kept[result.goalset_index]
+    log.info(
+        "cuMotion chose original grasp #%d (conf=%.3f)",
+        target_idx,
+        float(conf[target_idx]),
+    )
+    seg = result.segments
+    for name in ("approach", "grasp", "lift"):
+        log.info("  segment %s: %d waypoints", name, len(seg[name]))
+    result._segments = seg
+    return (
+        True,
+        result,
+        target_idx,
+        np.concatenate([seg["approach"], seg["grasp"]], axis=0),
+        seg["lift"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Trajectory export + viser visualization
 # ---------------------------------------------------------------------------
 
@@ -1298,6 +1407,18 @@ def compute_close_value_for_object(
 
 def main():
     args = parse_args()
+    if args.motion_backend == "cumotion" and (
+        args.task != "pick_and_lift"
+        or args.force_grasp_idx >= 0
+        or args.singleton_top_conf
+        or args.rank_grasps_by_confidence
+    ):
+        log.error(
+            "--motion_backend cumotion supports --task pick_and_lift in the default "
+            "goalset mode only (no --force_grasp_idx / --singleton_top_conf / "
+            "--rank_grasps_by_confidence)"
+        )
+        sys.exit(2)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -1454,15 +1575,24 @@ def main():
         log.error("GraspGen produced no grasps; aborting before motion planning.")
         sys.exit(2)
 
-    # cuRobo planning
+    # Motion planning (cuRobo or cuMotion)
     scene_model = collision_world_to_curobo(bundle.collision_world, bundle.robot_base_T)
     log.info("Collision scene_model: %s", json.dumps(scene_model, default=str)[:400])
-    # Goalset must be at least as large as the candidate set we'll send to plan_grasp.
-    planner = init_planner(
-        args.robot_config,
-        robot_cfg,
-        scene_model,
-        max_goalset=max(args.max_plan_attempts, len(grasps_world), 1),
+    t_init = time.perf_counter()
+    if args.motion_backend == "cumotion":
+        planner = init_cumotion_planner(args.robot_config, robot_cfg, scene_model)
+    else:
+        # Goalset must be at least as large as the candidates sent to plan_grasp.
+        planner = init_planner(
+            args.robot_config,
+            robot_cfg,
+            scene_model,
+            max_goalset=max(args.max_plan_attempts, len(grasps_world), 1),
+        )
+    log.info(
+        "Motion planner init (%s): %.2f s",
+        args.motion_backend,
+        time.perf_counter() - t_init,
     )
 
     force_idx_eff = args.force_grasp_idx
@@ -1481,16 +1611,33 @@ def main():
             force_idx_eff,
             float(conf[force_idx_eff]),
         )
-    success, result, target_idx, pregrasp_traj, lift_traj = plan_to_grasp(
-        planner,
-        robot_cfg,
-        grasps_world,
-        conf,
-        max_attempts=args.max_plan_attempts,
-        seed=args.seed,
-        robot_base_T=bundle.robot_base_T,
-        force_idx=force_idx_eff,
-        rank_by_confidence=args.rank_grasps_by_confidence,
+    t_plan = time.perf_counter()
+    if args.motion_backend == "cumotion":
+        success, result, target_idx, pregrasp_traj, lift_traj = plan_to_grasp_cumotion(
+            planner,
+            robot_cfg,
+            grasps_world,
+            conf,
+            max_attempts=args.max_plan_attempts,
+            robot_base_T=bundle.robot_base_T,
+        )
+    else:
+        success, result, target_idx, pregrasp_traj, lift_traj = plan_to_grasp(
+            planner,
+            robot_cfg,
+            grasps_world,
+            conf,
+            max_attempts=args.max_plan_attempts,
+            seed=args.seed,
+            robot_base_T=bundle.robot_base_T,
+            force_idx=force_idx_eff,
+            rank_by_confidence=args.rank_grasps_by_confidence,
+        )
+    log.info(
+        "Motion planning (%s): %.2f s, success=%s",
+        args.motion_backend,
+        time.perf_counter() - t_plan,
+        success,
     )
     # The trajectory is built as: approach + grasp + close + lift, so that
     # fingers close at the grasp pose BEFORE the arm lifts. This is what

@@ -22,12 +22,20 @@ Idempotent. Run once after ``uv sync --extra end2end``:
 
     python end2end/setup_end2end_deps.py
 
+Add ``--cumotion`` to also install NVIDIA cuMotion (for
+``e2e_grasp_demo.py --motion_backend cumotion``). cuMotion is not on PyPI, so
+this downloads its GitHub release into ``ext/cumotion`` and installs the wheel
+matching the running Python. cuMotion is licensed under the NVIDIA Isaac ROS Software
+License (see ``ext/cumotion/*/LICENSE``), separately from this repository.
+
 Only used by the end2end examples; the base install is unaffected.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -101,6 +109,39 @@ def _ensure_curobo_assets() -> None:
     print(f"[setup-e2e] cuRobo assets ready at {CUROBO_DIR}")
 
 
+# cuMotion release (https://github.com/nvidia-isaac/cumotion/releases). The
+# CUDA 12.6 x86_64 build supports Turing+ GPUs on Ubuntu 22.04/24.04; set
+# GRASPGENX_CUMOTION_CUDA=13.0 for the CUDA 13 build (Blackwell, Thor, Spark).
+CUMOTION_VERSION = os.environ.get("GRASPGENX_CUMOTION_VERSION", "1.1.0")
+CUMOTION_CUDA = os.environ.get("GRASPGENX_CUMOTION_CUDA", "12.6")
+CUMOTION_DIR = EXT_DIR / "cumotion"
+
+
+def _install_cumotion() -> None:
+    """Download the cuMotion release and install its wheel for this Python."""
+    name = f"cumotion-{CUMOTION_VERSION}-cuda{CUMOTION_CUDA}-{platform.machine()}"
+    url = (
+        "https://github.com/nvidia-isaac/cumotion/releases/download/"
+        f"v{CUMOTION_VERSION}/{name}.tar.gz"
+    )
+    release = CUMOTION_DIR / name
+    if not release.is_dir():
+        CUMOTION_DIR.mkdir(parents=True, exist_ok=True)
+        archive = CUMOTION_DIR / f"{name}.tar.gz"
+        print(f"[setup-e2e] downloading {url}")
+        subprocess.run(["curl", "-fSL", "-o", str(archive), url], check=True)
+        subprocess.run(
+            ["tar", "xzf", str(archive), "-C", str(CUMOTION_DIR)], check=True
+        )
+        archive.unlink()
+    tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    wheels = sorted((release / "python_wheels").glob(f"cumotion-*-{tag}-{tag}-*.whl"))
+    if not wheels:
+        raise SystemExit(f"[setup-e2e] no cuMotion wheel for {tag} in {release}")
+    print(f"[setup-e2e] installing {wheels[0].name}")
+    subprocess.run(["uv", "pip", "install", str(wheels[0])], check=True)
+
+
 # Validated tool0 mounts (rpy) for the merged UR10e + <gripper> robots. Each
 # must match the grasp_to_tool_transform in end2end/robots/ur10e_<gripper>.yaml.
 UR10E_GRIPPER_MOUNTS = {
@@ -140,6 +181,13 @@ def _build_ur10e_gripper(gripper: str, mount_rpy: list[str]) -> None:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument(
+        "--cumotion",
+        action="store_true",
+        help="also install NVIDIA cuMotion for --motion_backend cumotion",
+    )
+    args = ap.parse_args()
     _ensure_curobo_assets()
 
     # cuRobo's built wheel ships an incomplete content/ tree (no robot configs
@@ -158,6 +206,9 @@ def main() -> None:
     # Build the merged UR10e + <gripper> robots the UR10e demos need.
     for gripper, mount_rpy in UR10E_GRIPPER_MOUNTS.items():
         _build_ur10e_gripper(gripper, mount_rpy)
+
+    if args.cumotion:
+        _install_cumotion()
 
     print("[setup-e2e] done. Run end2end commands with `uv run --no-sync ...`.")
 

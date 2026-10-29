@@ -53,8 +53,8 @@ import yourdfpy
 
 # newton 1.0.0 reads ``wp.config.verbose`` at import time, which warp-lang 1.19
 # no longer defines. cuRobo sets it as a side effect of its own init, so the
-# import only worked when cuRobo was loaded first; set it here so the import
-# doesn't depend on import order.
+# import only worked when cuRobo was loaded first; set it here so playback
+# also works with --motion_backend cumotion.
 if not hasattr(wp.config, "verbose"):
     wp.config.verbose = False
 
